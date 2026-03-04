@@ -176,3 +176,12 @@ consistency, collision-free segments, and segment length limits (max. 0.3 m/segm
 - Your planner should have no issues with segment lengths if you leave `control_dt_s` at its default value of 0.2 seconds.
 
 **Success Criteria**: Your planner must produce at least 7 valid paths out of 10 trials, each with a time limit of 20 seconds.
+
+## Submission
+
+This assignment uses GitHub Classroom similarly to Assignment 1. Edit the necessary files,
+test your work locally, and then push changes to your private repository on GitHub Classroom.
+
+**Do not edit files other than those requested in the above question descriptions.**
+
+You may push as many times as needed before the deadline; we will only grade the most recent commit.

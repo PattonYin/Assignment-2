@@ -37,12 +37,18 @@ jobs:
           exit 0
 
       - name: Install Python dependencies
-        run: python3 -m pip install --user mujoco==3.4.0
+        shell: bash
+        run: |
+          python3 -m pip install --user mujoco==3.4.0
 
       - name: Build all packages (mujoco_ros2_bridge, a2_common, q1, q2, q3)
         shell: bash
         run: |
           source /opt/ros/jazzy/setup.bash
+          # Direct guard: keep ROS underlay on PYTHONPATH during this build step.
+          export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages${PYTHONPATH:+:$PYTHONPATH}
+          echo "PYTHONPATH before build: $PYTHONPATH"
+          python3 -c "import os, site; print('ENABLE_USER_SITE:', site.ENABLE_USER_SITE); print('PYTHONNOUSERSITE:', os.environ.get('PYTHONNOUSERSITE', ''))"
           python3 -c "import ament_package; print('ament_package OK')"
           python3 -c "import mujoco; print('mujoco OK')" || echo "WARNING: mujoco not importable before build"
           colcon build --symlink-install \
@@ -51,6 +57,7 @@ jobs:
             --packages-select mujoco_ros2_bridge a2_common q1 q2 q3
 
       - name: Diagnose Python/ROS environment post-build
+        if: always()
         shell: bash
         run: |
           set +e
@@ -70,12 +77,20 @@ jobs:
           python3 --version
           probe "After /opt/ros/jazzy/setup.bash" || true
 
-          if [ -f install/a2_common/local_setup.bash ]; then
-            source install/a2_common/local_setup.bash
-            echo "which python3 after a2_common hook: $(which python3)"
-            probe "After install/a2_common/local_setup.bash" || true
+          if [ -f install/a2_common/share/a2_common/local_setup.bash ]; then
+            source install/a2_common/share/a2_common/local_setup.bash
+            echo "which python3 after a2_common package hook: $(which python3)"
+            probe "After install/a2_common/share/a2_common/local_setup.bash" || true
           else
-            echo "Missing install/a2_common/local_setup.bash"
+            echo "Missing install/a2_common/share/a2_common/local_setup.bash"
+          fi
+
+          if [ -f install/setup.bash ]; then
+            source install/setup.bash
+            echo "which python3 after workspace overlay: $(which python3)"
+            probe "After install/setup.bash" || true
+          else
+            echo "Missing install/setup.bash"
           fi
 
           echo ""
@@ -100,6 +115,46 @@ jobs:
 
           # Informational only — does not affect subsequent steps.
           exit 0
+
+      - name: Dump q1 colcon command-prefix/env files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          echo "== build/q1 files =="
+          find build/q1 -maxdepth 4 -type f | sort || true
+          echo ""
+          echo "== log/latest_build/q1 files =="
+          find log/latest_build/q1 -maxdepth 3 -type f | sort || true
+
+          for f in \
+            build/q1/colcon_command_prefix_build.sh \
+            log/latest_build/q1/command.log \
+            log/latest_build/q1/stdout.log \
+            log/latest_build/q1/stderr.log \
+            log/latest_build/q1/stdout_stderr.log \
+            install/a2_common/share/a2_common/environment/pythonpath.sh \
+            install/a2_common/share/a2_common/environment/pythonpath.dsv \
+            install/a2_common/share/ament_index/resource_index/parent_prefix_path/a2_common \
+            install/mujoco_ros2_bridge/share/ament_index/resource_index/parent_prefix_path/mujoco_ros2_bridge
+          do
+            echo ""
+            echo "----- $f -----"
+            if [ -f "$f" ]; then
+              sed -n '1,220p' "$f"
+            else
+              echo "Missing $f"
+            fi
+          done
+
+          if [ -f build/q1/colcon_command_prefix_build.sh ]; then
+            echo ""
+            echo "== Probe under q1 command prefix =="
+            source /opt/ros/jazzy/setup.bash
+            source build/q1/colcon_command_prefix_build.sh
+            python3 -c "import os, site; print('ENABLE_USER_SITE:', site.ENABLE_USER_SITE); print('PYTHONNOUSERSITE:', os.environ.get('PYTHONNOUSERSITE', '')); print('USER_SITE:', site.getusersitepackages())"
+            python3 -c "import importlib.util, os, sys; spec = importlib.util.find_spec('ament_package'); print('sys.executable:', sys.executable); print('PYTHONPATH:', os.environ.get('PYTHONPATH', '')); print('ament_package:', spec.origin if spec else 'MISSING')"
+          fi
 
       # ── Q1 ────────────────────────────────────────────────────────
       - name: "Q1 — Occupancy Grid Mapping"
@@ -199,10 +254,12 @@ jobs:
         with:
           name: colcon-logs
           path: |
-            log
+            log/**/*
+            build/**/colcon_command_prefix_*.sh
             build/*/CMakeCache.txt
             build/*/ament_cmake_package_templates/*
-            install/a2_common/share/a2_common
+            install/a2_common/share/a2_common/**/*
+            install/*/share/ament_index/resource_index/parent_prefix_path/*
           if-no-files-found: warn
 
       - name: Results summary

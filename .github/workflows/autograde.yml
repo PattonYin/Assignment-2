@@ -1,0 +1,140 @@
+name: Autograding
+
+# Runs on every push and PR. Tests Q1, Q2, Q3 sequentially in one job.
+# Single job avoids reinstalling ROS repeatedly and keeps runtime predictable.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  autograde:
+    name: "Autograding (Q1 + Q2 + Q3)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: github.actor != 'github-classroom[bot]'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up ROS 2 Jazzy (headless)
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Install Python dependencies
+        run: pip install mujoco==3.4.0
+
+      - name: Build workspace
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --symlink-install \
+            --packages-select mujoco_ros2_bridge a2_common q1 q2 q3
+
+      # ── Q1 ────────────────────────────────────────────────────────
+      - name: "Q1 — Occupancy Grid Mapping"
+        id: q1
+        continue-on-error: true
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          export ROS_DOMAIN_ID=11
+
+          PROCESS_PAT="mujoco_sim_node|turtlebot_bridge_node|rviz2|rviz_marker_node|pure_pursuit_node|occupancy_mapper_node|test_occupancy_mapper"
+          pkill -9 -f "$PROCESS_PAT" 2>/dev/null || true
+          ros2 daemon stop 2>/dev/null || true
+          sleep 1
+
+          cleanup() {
+            kill $MAPPER_PID $BRINGUP_PID 2>/dev/null || true
+            pkill -9 -f "$PROCESS_PAT" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ros2 launch q1 turtlebot_bringup.launch.py \
+            use_viewer:=false use_map_viz:=false realtime_factor:=2.0 &
+          BRINGUP_PID=$!
+          sleep 3
+
+          ros2 run q1 occupancy_mapper_node.py &
+          MAPPER_PID=$!
+          sleep 3
+
+          timeout 90 ros2 run q1 test_occupancy_mapper.py
+          exit $?
+
+      # ── Q2 ────────────────────────────────────────────────────────
+      - name: "Q2 — Discrete Bayes Localization"
+        id: q2
+        continue-on-error: true
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          export ROS_DOMAIN_ID=12
+
+          PROCESS_PAT="mujoco_sim_node|turtlebot_bridge_node|rviz2|rviz_marker_node|pure_pursuit_node|bayes_localizer|test_bayes_localizer"
+          pkill -9 -f "$PROCESS_PAT" 2>/dev/null || true
+          ros2 daemon stop 2>/dev/null || true
+          sleep 1
+
+          cleanup() {
+            kill $BRINGUP_PID 2>/dev/null || true
+            pkill -9 -f "$PROCESS_PAT" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ros2 launch q2 q2_bayes_localization.launch.py \
+            use_viewer:=false use_map_viz:=false realtime_factor:=2.0 &
+          BRINGUP_PID=$!
+          sleep 5
+
+          timeout 120 ros2 run q2 test_bayes_localizer.py
+          exit $?
+
+      # ── Q3 ────────────────────────────────────────────────────────
+      - name: "Q3 — RRT Path Planning"
+        id: q3
+        continue-on-error: true
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          export ROS_DOMAIN_ID=13
+
+          PROCESS_PAT="mujoco_sim_node|turtlebot_bridge_node|rviz2|rviz_marker_node|pure_pursuit_node|rrt_planner|test_rrt_planner"
+          pkill -9 -f "$PROCESS_PAT" 2>/dev/null || true
+          ros2 daemon stop 2>/dev/null || true
+          sleep 1
+
+          cleanup() {
+            kill $BRINGUP_PID 2>/dev/null || true
+            pkill -9 -f "$PROCESS_PAT" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ros2 launch q3 q3_rrt_planning.launch.py \
+            use_viewer:=false use_map_viz:=false &
+          BRINGUP_PID=$!
+          sleep 5
+
+          timeout 300 ros2 run q3 test_rrt_planner.py
+          exit $?
+
+      # ── Summary ───────────────────────────────────────────────────
+      - name: Results summary
+        if: always()
+        run: |
+          Q1="${{ steps.q1.outcome }}"
+          Q2="${{ steps.q2.outcome }}"
+          Q3="${{ steps.q3.outcome }}"
+          echo "Q1 — Occupancy Grid Mapping   : $Q1"
+          echo "Q2 — Bayes Localization       : $Q2"
+          echo "Q3 — RRT Path Planning        : $Q3"
+          if [ "$Q1" != "success" ] || [ "$Q2" != "success" ] || [ "$Q3" != "success" ]; then
+            exit 1
+          fi

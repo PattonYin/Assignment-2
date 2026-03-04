@@ -1,0 +1,188 @@
+name: Submission Checks
+
+# This workflow validates assignment constraints:
+# - only designated handout files are modified
+# - student files contain no forbidden imports or topic subscriptions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-modified-files:
+    name: Verify only allowed files were changed
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-classroom[bot]'
+    steps:
+      - name: Checkout student repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check modified files against template
+        shell: bash
+        run: |
+          if [[ "${{ github.actor }}" == "github-classroom[bot]" ]]; then
+            echo "Skipping check for github-classroom[bot]."
+            exit 0
+          fi
+
+          git remote add template https://github.com/CSCI-1952D-Intelligent-Robotics/Assignment-2.git 2>/dev/null || true
+          git fetch template main --depth=1 --quiet
+          TEMPLATE_REF="template/main"
+
+          ALLOWED_MODIFIED_FILES=(
+            "src/q1/q1/occupancy_grid.py"
+            "src/a2_common/a2_common/motion_models.py"
+            "src/q2/scripts/bayes_localizer.py"
+            "src/q3/scripts/rrt_planner.py"
+          )
+
+          VIOLATIONS=""
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACDMRT "$TEMPLATE_REF" HEAD)
+
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+
+            # Ignore classroom/CI metadata files
+            if [[ "$file" == .github/* ]]; then
+              continue
+            fi
+
+            allowed=false
+            for allowed_file in "${ALLOWED_MODIFIED_FILES[@]}"; do
+              if [[ "$file" == "$allowed_file" ]]; then
+                allowed=true
+                break
+              fi
+            done
+
+            if [[ "$allowed" == false ]]; then
+              VIOLATIONS="$VIOLATIONS  - $file\n"
+            fi
+          done <<< "$CHANGED_FILES"
+
+          if [[ -n "$VIOLATIONS" ]]; then
+            echo "::error::You modified files outside the allowed handout set."
+            echo -e "$VIOLATIONS"
+            exit 1
+          fi
+
+          echo "All modified files are allowed."
+
+  check-no-forbidden-imports:
+    name: Verify no forbidden imports or topics
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-classroom[bot]'
+    steps:
+      - name: Checkout student repo
+        uses: actions/checkout@v4
+
+      - name: Check Q1 — occupancy_grid.py
+        run: |
+          FILE="src/q1/q1/occupancy_grid.py"
+          echo "=== Checking $FILE ==="
+
+          # This is a pure algorithm class — it must not contain any ROS code.
+          # The autograder publishes /gt/occupancy_map live during Q1; embedding rclpy
+          # code here would allow subscribing to ground-truth data.
+          if grep -qE '^\s*(import rclpy|from rclpy)' "$FILE"; then
+            echo "::error::❌ $FILE imports rclpy — this file must be a pure algorithm class with no ROS code."
+            exit 1
+          fi
+
+          if grep -qE '["'"'"']/gt/' "$FILE"; then
+            echo "::error::❌ $FILE references a /gt/* topic — ground-truth data is not allowed here."
+            exit 1
+          fi
+
+          # Students must not use MuJoCo directly — all sim data arrives via ROS topics
+          if grep -qE '^\s*(import mujoco|from mujoco)' "$FILE"; then
+            echo "::error::❌ $FILE imports mujoco — this is not allowed."
+            exit 1
+          fi
+
+          if grep -qE 'mj_|mjModel|mjData|mj_data|mj_model' "$FILE"; then
+            echo "::error::❌ $FILE accesses MuJoCo internals — this is not allowed."
+            exit 1
+          fi
+
+          echo "✅ $FILE passed all checks."
+
+      - name: Check Q2 — motion_models.py
+        run: |
+          FILE="src/a2_common/a2_common/motion_models.py"
+          echo "=== Checking $FILE ==="
+
+          # This is a pure math module — it must not contain any ROS code.
+          if grep -qE '^\s*(import rclpy|from rclpy)' "$FILE"; then
+            echo "::error::❌ $FILE imports rclpy — this file must contain pure Python math with no ROS code."
+            exit 1
+          fi
+
+          # Motion models are pure math — no simulator access allowed
+          if grep -qE '^\s*(import mujoco|from mujoco)' "$FILE"; then
+            echo "::error::❌ $FILE imports mujoco — this is not allowed."
+            exit 1
+          fi
+
+          if grep -qE 'mj_|mjModel|mjData|mj_data|mj_model' "$FILE"; then
+            echo "::error::❌ $FILE accesses MuJoCo internals — this is not allowed."
+            exit 1
+          fi
+
+          echo "✅ $FILE passed all checks."
+
+      - name: Check Q2 — bayes_localizer.py
+        run: |
+          FILE="src/q2/scripts/bayes_localizer.py"
+          echo "=== Checking $FILE ==="
+
+          if grep -qE '^\s*(import mujoco|from mujoco)' "$FILE"; then
+            echo "::error::❌ $FILE imports mujoco — this is not allowed."
+            exit 1
+          fi
+
+          if grep -qE '["'"'"']/gt/' "$FILE"; then
+            echo "::error::❌ $FILE accesses /gt/* topics — this is not allowed."
+            exit 1
+          fi
+
+          # Do not allow students to add subscriptions beyond the starter template.
+          [[ $(grep -c 'create_subscription(' "$FILE") -eq 2 ]] || { echo "::error::❌ $FILE must keep exactly 2 subscriptions."; exit 1; }
+          grep -qE '["'"'"']/laser_scans["'"'"']' "$FILE" || { echo "::error::❌ Missing /laser_scans subscription."; exit 1; }
+          grep -qE '["'"'"']/cmd_vel["'"'"']' "$FILE" || { echo "::error::❌ Missing /cmd_vel subscription."; exit 1; }
+
+          # The grader's only input is /estimated_odometry — verify it is still published.
+          grep -qE '["'"'"']/estimated_odometry["'"'"']' "$FILE" || { echo "::error::❌ Missing /estimated_odometry publisher."; exit 1; }
+
+          echo "✅ $FILE passed all checks."
+
+      - name: Check Q3 — rrt_planner.py
+        run: |
+          FILE="src/q3/scripts/rrt_planner.py"
+          echo "=== Checking $FILE ==="
+
+          if grep -qE '^\s*(import mujoco|from mujoco)' "$FILE"; then
+            echo "::error::❌ $FILE imports mujoco — this is not allowed."
+            exit 1
+          fi
+
+          if grep -qE 'mj_|mjModel|mjData|mj_data|mj_model' "$FILE"; then
+            echo "::error::❌ $FILE accesses MuJoCo internals — this is not allowed."
+            exit 1
+          fi
+
+          # Keep subscription interfaces fixed to the starter template.
+          [[ $(grep -c 'create_subscription(' "$FILE") -eq 1 ]] || { echo "::error::❌ $FILE must keep exactly 1 subscription."; exit 1; }
+          grep -qE '["'"'"']/gt/occupancy_map["'"'"']' "$FILE" || { echo "::error::❌ Missing /gt/occupancy_map subscription."; exit 1; }
+          BAD_GT_TOPICS=$(grep -oE '["'"'"']/gt/[A-Za-z0-9_/]+' "$FILE" | sed -E 's/^["'"'"']//g' | sort -u | grep -v '^/gt/occupancy_map$' || true)
+          if [[ -n "$BAD_GT_TOPICS" ]]; then
+            echo "::error::❌ $FILE accesses disallowed /gt/* topics."
+            echo "$BAD_GT_TOPICS"
+            exit 1
+          fi
+
+          echo "✅ $FILE passed all checks."

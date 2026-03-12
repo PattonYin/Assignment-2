@@ -213,45 +213,8 @@ class TestBayesLocalizer(Node):
             est_yaw_rad=est_yaw_arr_rad, gt_yaw_rad=gt_yaw_arr_rad
         )
 
-        map_center_xy = np.array([0.0, 0.0], dtype=np.float32)
-        centered_gt_xy = np.asarray(gt_arr - map_center_xy, dtype=np.float32)
-        quarter_turn_rad = np.float32(np.pi / 2.0)
-        aliased_pos_rmse_by_rot: list[float] = []
-        aliased_yaw_rmse_by_rot: list[float] = []
-        for rot_idx in range(4):
-            rot_rad = rot_idx * quarter_turn_rad
-            sin_rot = np.float32(np.sin(rot_rad))
-            cos_rot = np.float32(np.cos(rot_rad))
-            rot_mat = np.array(
-                [[cos_rot, -sin_rot], [sin_rot, cos_rot]], dtype=np.float32
-            )
-            rotated_gt_xy = centered_gt_xy @ rot_mat.T + map_center_xy
-            rotated_gt_yaw_rad = gt_yaw_arr_rad + rot_rad
-
-            aliased_pos_rmse_by_rot.append(
-                self._position_rmse_m(est_xy=est_arr, gt_xy=rotated_gt_xy)
-            )
-            aliased_yaw_rmse_by_rot.append(
-                self._yaw_rmse_rad(
-                    est_yaw_rad=est_yaw_arr_rad, gt_yaw_rad=rotated_gt_yaw_rad
-                )
-            )
-
-        aliased_pos_rmse_arr = np.asarray(aliased_pos_rmse_by_rot, dtype=np.float32)
-        aliased_yaw_rmse_arr = np.asarray(aliased_yaw_rmse_by_rot, dtype=np.float32)
-        aliased_cost = aliased_pos_rmse_arr**2 + aliased_yaw_rmse_arr**2
-        aliased_best_idx = int(np.argmin(aliased_cost))
-        aliased_pos_rmse_m = float(aliased_pos_rmse_arr[aliased_best_idx])
-        aliased_yaw_rmse_rad = float(aliased_yaw_rmse_arr[aliased_best_idx])
-
         passed = (pos_rmse_m <= self._pos_rmse_max_m) and (
             yaw_rmse_rad <= self._yaw_rmse_max_rad
-        )
-        aliased_passed = bool(
-            np.any(
-                (aliased_pos_rmse_arr <= self._pos_rmse_max_m)
-                & (aliased_yaw_rmse_arr <= self._yaw_rmse_max_rad)
-            )
         )
 
         print("\n" + "=" * 60)
@@ -263,8 +226,6 @@ class TestBayesLocalizer(Node):
         print(f"Required RMSE (m):   <= {self._pos_rmse_max_m:.3f}")
         print(f"Yaw RMSE (rad):      {yaw_rmse_rad:.3f}")
         print(f"Required RMSE (rad): <= {self._yaw_rmse_max_rad:.3f}")
-        print(f"Aliased Pos RMSE (m):   {aliased_pos_rmse_m:.3f}")
-        print(f"Aliased Yaw RMSE (rad): {aliased_yaw_rmse_rad:.3f}")
         print("PASS" if passed else "FAIL")
         print("=" * 60 + "\n")
 

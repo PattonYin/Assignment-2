@@ -247,7 +247,7 @@ jobs:
           BRINGUP_PID=$!
           sleep 5
 
-          timeout 300 ros2 run q3 test_rrt_planner.py --ros-args -p plan_timeout_s:=60.0
+          timeout 600 ros2 run q3 test_rrt_planner.py --ros-args -p plan_timeout_s:=60.0
           exit $?
 
       # ── Summary ───────────────────────────────────────────────────

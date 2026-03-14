@@ -1,5 +1,5 @@
 """Define motion-model utility functions."""
-
+import math
 
 def simulate_velocity_delta(
     theta_rad: float,
@@ -23,7 +23,20 @@ def simulate_velocity_delta(
     :param eps_wz_radps: Threshold for treating angular velocity as zero (default: 1e-6)
     :return: Delta in robot pose as the tuple `(dx_m, dy_m, dtheta_rad)`
     """
-    return 0.0, 0.0, 0.0  # TODO
+    theta = theta_rad
+    v = vx_mps
+    w = wz_radps
+    dt = dt_s
+
+    dtheta = w * dt
+    if abs(w) < eps_wz_radps:
+        dx = v * dt * math.cos(theta)
+        dy = v * dt * math.sin(theta)
+    else:
+        dx = -v / w * math.sin(theta) + v / w * math.sin(theta + dtheta)
+        dy = v / w * (math.cos(theta) - math.cos(theta + dtheta))
+
+    return dx, dy, dtheta
 
 
 def simulate_velocity_command(

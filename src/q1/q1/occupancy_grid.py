@@ -32,7 +32,8 @@ class OccupancyGrid:
 
         Reference: Eq. 9.5 (Chapter 9.2) of "Probabilistic Robotics" by Thrun, Burgard, and Fox (2006).
         """
-        return np.zeros_like(prob)  # TODO
+        log_odds = np.log(prob / (1 - prob)) 
+        return log_odds  # TODO
 
     @staticmethod
     def log_odds_to_prob(
@@ -42,7 +43,9 @@ class OccupancyGrid:
 
         Reference: Eq. 9.6 (Chapter 9.2) of "Probabilistic Robotics" by Thrun, Burgard, and Fox (2006).
         """
-        return np.zeros_like(log_odds)  # TODO
+        # return 1 - 1 / (1 + np.exp(log_odds))  # TODO
+        safe_log_odds = np.clip(log_odds, -100, 100)
+        return 1 - 1 / (1 + np.exp(safe_log_odds))
 
     def update(
         self, scan: PosedLaserScan, *, p_free: float = 0.2, p_occupied: float = 0.8
@@ -83,4 +86,35 @@ class OccupancyGrid:
         :param p_free: Probability that a cell is occupied given a laser passes through it
         :param p_occupied: Probability that a cell is occupied given a laser hits in it
         """
-        pass  # TODO
+        robot_x = scan.sensor_pose.x
+        robot_y = scan.sensor_pose.y
+        robot_theta = scan.sensor_pose.theta
+
+        angle_min = scan.scan.angle_min
+        angle_increment = scan.scan.angle_increment
+        log_odds_free = self.prob_to_log_odds(p_free)
+        log_odds_occupied = self.prob_to_log_odds(p_occupied)
+
+        start_cell = self.grid_info.coord_to_cell((robot_x, robot_y))
+
+        for i, range_measurement in enumerate(scan.scan.ranges):
+            if not (np.isfinite(range_measurement)
+                    and scan.scan.range_min <= range_measurement <= scan.scan.range_max):
+                continue
+
+            beam_angle = robot_theta + angle_min + i * angle_increment
+            beam_x = robot_x + range_measurement * np.cos(beam_angle)
+            beam_y = robot_y + range_measurement * np.sin(beam_angle)
+
+            end_cell = self.grid_info.coord_to_cell((beam_x, beam_y))
+
+            for cell in bresenham_line(start_cell, end_cell)[:-1]:
+                if self.grid_info.is_valid_cell(cell):
+                    self.log_odds[cell.row, cell.col] += log_odds_free
+
+            depth_x = beam_x + self.min_obstacle_depth_m * np.cos(beam_angle)
+            depth_y = beam_y + self.min_obstacle_depth_m * np.sin(beam_angle)
+            depth_cell = self.grid_info.coord_to_cell((depth_x, depth_y))
+            for cell in bresenham_line(end_cell, depth_cell):
+                if self.grid_info.is_valid_cell(cell):
+                    self.log_odds[cell.row, cell.col] += log_odds_occupied

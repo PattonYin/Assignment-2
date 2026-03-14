@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Script defining a ROS 2 node that runs occupancy mapping."""
 
+import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose2D
@@ -52,6 +53,17 @@ class OccupancyMapperNode(Node):
 
         self.create_timer(1.0 / self._publish_rate_hz, self._publish_map_cb)
 
+        plt.ion()
+        self._fig, self._ax = plt.subplots()
+        self._im = self._ax.imshow(
+            self._occupancy_grid.log_odds,
+            origin="lower",
+            cmap="RdYlGn_r",
+            vmin=-5,
+            vmax=5,
+        )
+        self._fig.colorbar(self._im, ax=self._ax, label="Log Odds")
+
     def _odometry_cb(self, msg: Pose2D) -> None:
         """Store the latest robot odometry into a member variable."""
         self._latest_odom = msg
@@ -70,6 +82,9 @@ class OccupancyMapperNode(Node):
     def _publish_map_cb(self) -> None:
         """Publish the current occupancy grid as a nav_msgs/OccupancyGrid message."""
         self._map_pub.publish(self._build_occupancy_map_msg())
+        self._im.set_data(self._occupancy_grid.log_odds)
+        self._fig.canvas.draw_idle()
+        self._fig.canvas.flush_events()
 
     def _build_occupancy_map_msg(self) -> OccupancyGridMsg:
         """Build an occupancy grid ROS message from the internal log-odds map.

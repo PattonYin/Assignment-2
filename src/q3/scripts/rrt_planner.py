@@ -29,6 +29,8 @@ from a2_common import (
     unpack_occupancy_grid_msg,
     yaw_to_quaternion_msg,
 )
+from a2_common.motion_models import simulate_velocity_command
+
 
 
 def _wrap_angle_rad(theta_rad: float) -> float:
@@ -192,34 +194,51 @@ class RRTPlanner(Node):
         """
         self._tree_edges_xy = []  # Used for RRT visualization in RViz
 
-        # TODO: Implement the rest of this method
-
         # Initialize the RRT node list using the start pose as the root node
-        tree_nodes: list[RRTNode] = []  # TODO
+        parent_node = RRTNode(pose=start_pose, parent_idx=-1)
+        tree_nodes: list[RRTNode] = [parent_node] 
 
         for _ in range(self._max_iters):
             # With probability `self._goal_bias`, use the goal pose as the random state,
             #   otherwise sample a random state using `self._random_state`
-
+            random_prob = np.random.uniform(0, 1)
+            
+            if random_prob <= self._goal_bias:
+                random_pose = goal_pose
+            else:
+                random_pose = self._random_state()
+            
+            if random_pose is None:
+                continue
+            
             # Find the nearest RRT node to the random state using `self._nearest_neighbor_idx`
-
+            nearest_rrt_idx = self._nearest_neighbor_idx(tree_nodes, random_pose)
+            nearest_node = tree_nodes[nearest_rrt_idx]
+            
             # Select a control input to steer toward the random state from the nearest node
             #   and compute the resulting new state (`self._select_input_and_new_state`)
             # If `_select_input_and_new_state` returns None, `continue` to skip this iteration
-
+            new_pose = self._select_input_and_new_state(nearest_node, random_pose, self._control_options)
+            if new_pose is None:
+                continue
+            
             # Once nearest_node and new_pose are defined, uncomment to store the edge for visualization:
-            # self._tree_edges_xy.append(
-            #     (nearest_node.pose.x, nearest_node.pose.y, new_pose.x, new_pose.y)
-            # )
-            # if len(self._tree_edges_xy) % self._tree_publish_stride_iters == 0:
-            #     self._publish_rrt_tree_cb()
+            self._tree_edges_xy.append(
+                (nearest_node.pose.x, nearest_node.pose.y, new_pose.x, new_pose.y)
+            )
+            if len(self._tree_edges_xy) % self._tree_publish_stride_iters == 0:
+                self._publish_rrt_tree_cb()
 
             # Create a node for the new state that resulted from the selected control input
-
+            new_node = RRTNode(pose=new_pose, parent_idx=nearest_rrt_idx)
+            
             # If the new node is sufficiently close to the goal pose (`self._is_goal_reached`),
-            #   extract the solution path from the list of tree nodes (`self._extract_path`)
-            pass
-
+            #   extract the solution path from the list of tree nodes (`self._extract_path`)    
+            tree_nodes.append(new_node)
+            if self._is_goal_reached(new_pose, goal_pose):
+                return self._extract_path(tree_nodes, len(tree_nodes) - 1)
+            
+        
         self.get_logger().info(f"Reached {self._max_iters} RRT iterations; exiting...")
         return []
 
@@ -229,7 +248,18 @@ class RRTPlanner(Node):
         :param num_attempts: Maximum number of times to attempt resampling (default: 100)
         :return: Random free pose in the map, or None if sampling fails
         """
-        return None  # TODO
+        x_min = self._grid_info.origin_x
+        x_max = self._grid_info.origin_x + self._grid_info.width_cells * self._grid_info.resolution_m
+        y_min = self._grid_info.origin_y
+        y_max = self._grid_info.origin_y + self._grid_info.height_cells * self._grid_info.resolution_m
+
+        for _ in range(num_attempts):
+            x = self._rng.uniform(x_min, x_max)
+            y = self._rng.uniform(y_min, y_max)
+            theta = self._rng.uniform(-math.pi, math.pi)
+            if not self._in_collision(x, y):
+                return Pose2D(x, y, theta)
+        return None
 
     @staticmethod
     def _rho_distance(pose_a: Pose2D, pose_b: Pose2D, heading_weight: float) -> float:
@@ -242,7 +272,12 @@ class RRTPlanner(Node):
         :param heading_weight: Weight value used for angular error
         :return: Computed distance metric
         """
-        return 0.0  # TODO
+        x_a, y_a, theta_a = pose_a.x, pose_a.y, pose_a.theta_rad
+        x_b, y_b, theta_b = pose_b.x, pose_b.y, pose_b.theta_rad
+
+        pos_dist = math.hypot(x_b - x_a, y_b - y_a)
+        heading_dist = abs(_wrap_angle_rad(theta_b - theta_a))
+        return pos_dist + heading_weight * heading_dist
 
     def _nearest_neighbor_idx(
         self, tree_nodes: list[RRTNode], random_pose: Pose2D
@@ -253,7 +288,14 @@ class RRTPlanner(Node):
         :param random_pose: Sampled random 2D pose
         :return: Index of the nearest tree node, according to the rho state-space metric
         """
-        return 0  # TODO
+        nn_idx = None
+        nn_value = float("inf")
+        for i, node in enumerate(tree_nodes):
+            dist = self._rho_distance(node.pose, random_pose, self._heading_distance_weight)
+            if dist < nn_value:
+                nn_value = dist
+                nn_idx = i
+        return nn_idx
 
     def _new_state_trajectory(
         self,
@@ -279,7 +321,19 @@ class RRTPlanner(Node):
         :param collision_check_step_m: Spacing (meters) between poses checked for collisions
         :return: Sequence of propagated states (excluding the initial state)
         """
-        return []  # TODO
+        step_dt = collision_check_step_m / max(vx_mps, 1e-6)
+        n_steps = max(1, int(duration_s / step_dt))
+        dt_s = duration_s / n_steps
+
+        current_pose = start_pose
+        poses = []
+        for _ in range(n_steps):
+            x, y, theta = simulate_velocity_command(
+                current_pose.x, current_pose.y, current_pose.theta_rad, vx_mps, wz_radps, dt_s
+            )
+            current_pose = Pose2D(x, y, theta)
+            poses.append(current_pose)
+        return poses
 
     def _select_input_and_new_state(
         self,
@@ -299,7 +353,24 @@ class RRTPlanner(Node):
         :param control_options: List of possible (vx_mps, wz_radps) velocity commands
         :return: New pose resulting from the best control option, or None if all produce collisions
         """
-        return None  # TODO
+        best_end_pose = None
+        best_end_pose_dist = float('inf')
+        for control_option in control_options:
+            traj = self._new_state_trajectory(nearest_node.pose, control_option[0], control_option[1], self._control_dt_s, self._collision_step_m)
+
+            traj_ok = True
+            for pose in traj:
+                if self._in_collision(pose.x, pose.y):
+                    traj_ok = False
+                    break
+            if not traj_ok:
+                continue
+            dist = self._rho_distance(traj[-1], random_pose, self._heading_distance_weight)
+            if dist < best_end_pose_dist:
+                best_end_pose_dist = dist
+                best_end_pose = traj[-1]
+            
+        return best_end_pose
 
     def _in_collision(self, x: float, y: float) -> bool:
         """Check whether the robot is in collision at the given point.
@@ -313,7 +384,10 @@ class RRTPlanner(Node):
         :param y: Map-frame y-coordinate of the robot
         :return: True if the point is in collision, otherwise False
         """
-        return True  # TODO
+        cell = self._world_to_cell(x, y)
+        if cell is None:
+            return True
+        return self._costmap_0_100[cell.row, cell.col] >= self._occupied_threshold
 
     def _world_to_cell(self, x: float, y: float) -> GridCell | None:
         """Convert world coordinates to costmap cell indices (None if cell is invalid)."""

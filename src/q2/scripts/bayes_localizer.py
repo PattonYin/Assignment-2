@@ -4,6 +4,7 @@
 import math
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -105,11 +106,24 @@ class BayesLocalizer(Node):
         self._prediction_dt_s = 1.0 / prediction_rate_hz
         self.create_timer(self._prediction_dt_s, self._prediction_timer_cb)
 
+        plt.ion()
+        h, w = self._grid_info.height_cells, self._grid_info.width_cells
+        self._fig, (self._ax_map, self._ax_pred, self._ax_corr) = plt.subplots(1, 3, figsize=(15, 4))
+        blank = np.zeros((h, w))
+        self._ax_map.imshow(self._free_mask, origin="lower", cmap="gray")
+        self._ax_map.set_title("Ground Truth Map")
+        self._im_pred = self._ax_pred.imshow(blank, origin="lower", vmin=0)
+        self._im_corr = self._ax_corr.imshow(blank, origin="lower", vmin=0)
+        self._ax_pred.set_title("After Predict")
+        self._ax_corr.set_title("After Correct")
+        plt.tight_layout()
+
     def _laser_scan_cb(self, msg: LaserScan) -> None:
         """Apply a correction update using the latest scan and publish the resulting MAP pose."""
         self._belief = self._correct_belief(
             self._belief, msg, every_nth_beam=self._every_nth_beam
         )
+        self._update_plot(self._im_corr, self._belief)
 
         pose_msg = self._map_pose_from_belief(self._belief)
         self._pose_pub.publish(pose_msg)
@@ -126,6 +140,13 @@ class BayesLocalizer(Node):
         self._latest_vx_mps = float(msg.linear.x)
         self._latest_wz_radps = float(msg.angular.z)
 
+    def _update_plot(self, im, belief) -> None:
+        marginal = belief.sum(axis=0)  # sum over theta -> (h, w)
+        im.set_data(marginal)
+        im.set_clim(0, marginal.max() or 1)
+        self._fig.canvas.draw_idle()
+        plt.pause(0.001)
+
     def _prediction_timer_cb(self) -> None:
         """Run one prediction step using the latest velocity command."""
         self._belief = self._predict_belief(
@@ -135,6 +156,7 @@ class BayesLocalizer(Node):
             dt_s=self._prediction_dt_s,
             off_by_one_prob=self._off_by_one_prob,
         )
+        self._update_plot(self._im_pred, self._belief)
 
     def _map_pose_from_belief(self, belief: NDArray[np.float32]) -> Pose2D:
         """Convert the maximum a posteriori belief index to a world-frame 2D pose."""
@@ -231,8 +253,45 @@ class BayesLocalizer(Node):
         :param off_by_one_prob: Probability of off-by-one theta-bin transition noise
         :return: Predicted normalized belief tensor
         """
-        return belief  # TODO
+        res = self._grid_info.resolution_m
+        predicted = np.zeros_like(belief)
 
+        for t, theta in enumerate(self._theta_vals_rad):
+            dx, dy, _ = simulate_velocity_delta(float(theta), vx_mps, wz_radps, dt_s)
+            dc = dx / res
+            dr = dy / res
+
+            dc_int = int(math.floor(dc))
+            dc_frac = dc - dc_int
+            dr_int = int(math.floor(dr))
+            dr_frac = dr - dr_int
+
+            grid = belief[t]
+            predicted_t = np.zeros_like(predicted[t])
+            for (dc_prob, dc) in [(1.0 - dc_frac, dc_int), (dc_frac, dc_int + 1)]:
+                for (dr_prob, dr) in [(1.0 - dr_frac, dr_int), (dr_frac, dr_int + 1)]:
+                    prob = dc_prob * dr_prob
+                    predicted_t += prob * self._shift_no_wrap(grid, dr, dc)
+            predicted[t] = predicted_t
+
+        dtheta_bins = (wz_radps * dt_s) / self._theta_step_rad
+        dtheta_int = int(math.floor(dtheta_bins))
+        dtheta_frac = dtheta_bins - dtheta_int
+
+        predicted_0 = np.zeros_like(predicted)
+        for (dtheta_prob, dtheta) in [(1.0 - dtheta_frac, dtheta_int), (dtheta_frac, dtheta_int + 1)]:
+            predicted_0 += dtheta_prob * np.roll(predicted, dtheta, axis=0)
+            
+        predicted_1 = np.zeros_like(predicted)
+        for (dtheta_prob, dtheta) in [(1.0 - off_by_one_prob, 0), (off_by_one_prob / 2.0, 1), (off_by_one_prob / 2.0, -1)]:
+            predicted_1 += dtheta_prob * np.roll(predicted, dtheta, axis=0)
+
+        predicted = predicted_1
+
+        # Step 4: Zero out occupied cells and normalize.
+        predicted[:, ~self._free_mask] = 0.0
+        return self._normalize(predicted)
+    
     def _correct_belief(
         self,
         belief: NDArray[np.float32],
@@ -273,8 +332,38 @@ class BayesLocalizer(Node):
         :param miss_likelihood: Likelihood used when projected endpoint occupancy mismatches
         :return: Corrected normalized belief tensor
         """
-        return belief  # TODO
+        H, W = self._grid_info.height_cells, self._grid_info.width_cells
+        res = self._grid_info.resolution_m
 
+        ranges = np.asarray(scan.ranges, dtype=np.float32)
+        beam_indices = np.arange(0, len(ranges), every_nth_beam)
+
+        log_hit = math.log(hit_likelihood)
+        log_miss = math.log(miss_likelihood)
+        occ_mask = ~self._free_mask 
+
+        log_likelihood = np.zeros((self._theta_bins, H, W), dtype=np.float32)
+
+        for t, theta in enumerate(self._theta_vals_rad):
+            for i in beam_indices:
+                r = float(ranges[i])
+                if not (math.isfinite(r) and scan.range_min <= r <= scan.range_max):
+                    continue
+
+                world_angle = float(theta) + scan.angle_min + i * scan.angle_increment
+                dx = r * math.cos(world_angle)
+                dy = r * math.sin(world_angle)
+
+                dc_int = int(round(dx / res))
+                dr_int = int(round(dy / res))
+
+                endpoint_occ = self._shift_no_wrap(occ_mask, -dr_int, -dc_int)
+                log_likelihood[t] += np.where(endpoint_occ, log_hit, log_miss)
+
+        log_likelihood -= log_likelihood.max()
+        updated = belief * np.exp(log_likelihood)
+        updated[:, ~self._free_mask] = 0.0
+        return self._normalize(updated)
 
 def main() -> None:
     """Initialize ROS and spin the Q2 localizer node."""
